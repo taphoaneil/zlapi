@@ -1,24 +1,33 @@
+from enum import auto
 from ._core import Enum
 
 class GroupEventType(Enum):
-	"""Used to specify which type of Zalo group event is being used."""
+	JOIN_REQUEST = auto()
+	JOIN = auto()
+	LEAVE = auto()
+	REMOVE_MEMBER = auto()
+	BLOCK_MEMBER = auto()
 	
-	JOIN = "join"
-	LEAVE = "leave"
-	UPDATE = "update"
-	UNKNOWN = "unknown"
-	REACTION = "reaction"
-	NEW_LINK = "new_link"
-	ADD_ADMIN = "add_admin"
-	REMOVE_ADMIN = "remove_admin"
-	JOIN_REQUEST = "join_request"
-	BLOCK_MEMBER = "block_member"
-	REMOVE_MEMBER = "remove_member"
-	UPDATE_SETTING = "update_setting"
+	UPDATE_SETTING = auto()
+	UPDATE = auto()
+	NEW_LINK = auto()
+	
+	ADD_ADMIN = auto()
+	REMOVE_ADMIN = auto()
+	
+	NEW_PIN_TOPIC = auto()
+	UPDATE_PIN_TOPIC = auto()
+	REORDER_PIN_TOPIC = auto()
+	
+	UPDATE_BOARD = auto()
+	REMOVE_BOARD = auto()
+	
+	UPDATE_TOPIC = auto()
+	UNPIN_TOPIC = auto()
+	REMOVE_TOPIC = auto()
+	
+	UNKNOWN = auto()
 
 
 class EventType(Enum):
-	"""Used to specify which type of Zalo user event is being used."""
-	
-	REACTION = "reaction"
-	
+	REACTION = auto()
