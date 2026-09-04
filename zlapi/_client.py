@@ -374,6 +374,26 @@ class ZaloAPI(object):
 				except:
 					results = {"error_code": 1337, "error_message": results}
 			
+			if not isinstance(results, dict):
+				raise ZaloAPIException("Image upload returned an invalid response.")
+			imageUrl = next(
+				(
+					results.get(key)
+					for key in ("normalUrl", "hdUrl", "oriUrl")
+					if isinstance(results.get(key), str) and results.get(key)
+				),
+				None,
+			)
+			if imageUrl is None:
+				errorMessage = results.get("error_message") or results.get("message") or results
+				raise ZaloAPIException(f"Image upload did not return a usable URL: {errorMessage}")
+			# Zalo may return only hdUrl or oriUrl for an Original photo. The
+			# message API still requires all three fields, so use that URL for
+			# the missing variants instead of allowing a KeyError later.
+			results = dict(results)
+			results["normalUrl"] = results.get("normalUrl") or imageUrl
+			results["thumbUrl"] = results.get("thumbUrl") or imageUrl
+			results["hdUrl"] = results.get("hdUrl") or imageUrl
 			return results
 			
 		error_code = data.get("error_code")
@@ -3401,6 +3421,9 @@ class ZaloAPI(object):
 	
 	def _buildMultiLocalImagePayload(self, uploadImage, thread_id, thread_type, width, height, message, ttl, groupLayoutId, totalItemInGroup, idInGroup):
 		"""Build one unencoded payload for a prepared image in an album."""
+		imageUrl = uploadImage.get("normalUrl") or uploadImage.get("hdUrl") or uploadImage.get("oriUrl")
+		if not isinstance(imageUrl, str) or not imageUrl:
+			raise ZaloAPIException("Image upload did not return a usable URL.")
 		payload = {
 			"params": {
 				"photoId": uploadImage.get("photoId", int(_util.now() * 2)),
@@ -3412,9 +3435,9 @@ class ZaloAPI(object):
 				"totalItemInGroup": totalItemInGroup,
 				"isGroupLayout": 1,
 				"idInGroup": idInGroup,
-				"rawUrl": uploadImage["normalUrl"],
-				"thumbUrl": uploadImage["thumbUrl"],
-				"hdUrl": uploadImage["hdUrl"],
+				"rawUrl": imageUrl,
+				"thumbUrl": uploadImage.get("thumbUrl") or imageUrl,
+				"hdUrl": uploadImage.get("hdUrl") or imageUrl,
 				"thumbSize": "53932",
 				"fileSize": "247671",
 				"hdSize": "344622",
@@ -3430,10 +3453,10 @@ class ZaloAPI(object):
 
 		if thread_type == ThreadType.USER:
 			payload["params"]["toid"] = str(thread_id)
-			payload["params"]["normalUrl"] = uploadImage["normalUrl"]
+			payload["params"]["normalUrl"] = imageUrl
 		elif thread_type == ThreadType.GROUP:
 			payload["params"]["grid"] = str(thread_id)
-			payload["params"]["oriUrl"] = uploadImage["normalUrl"]
+			payload["params"]["oriUrl"] = imageUrl
 		else:
 			raise ZaloUserError("Thread type is invalid")
 
@@ -3492,11 +3515,15 @@ class ZaloAPI(object):
 		totalItemInGroup = len(prepared)
 		sent = []
 		for idInGroup, (index, imagePath, uploadImage, imageWidth, imageHeight) in enumerate(prepared):
-			for attempt in range(2):
+			try:
 				payload = self._buildMultiLocalImagePayload(
 					uploadImage, thread_id, thread_type, imageWidth, imageHeight, message, ttl,
 					groupLayoutId, totalItemInGroup, idInGroup,
 				)
+			except Exception as error:
+				failed.append(ImageSendFailure(index, imagePath, "upload", str(error)))
+				continue
+			for attempt in range(2):
 				try:
 					sent.append(self.sendLocalImage(
 						imagePath, thread_id, thread_type, imageWidth, imageHeight, message,
