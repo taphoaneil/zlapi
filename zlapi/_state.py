@@ -24,6 +24,7 @@ class State(object):
 		cls._cookies = _util.COOKIES
 		cls._session = requests.Session()
 		cls.cloud_id = None
+		cls.account_id = None
 		cls.user_imei = None
 		cls._loggedin = False
 	
@@ -53,7 +54,7 @@ class State(object):
 
 	@property
 	def user_id(cls):
-		return cls._config.get("send2me_id")
+		return cls._config.get("account_id")
 	
 	def login(cls, phone, password, imei, session_cookies=None, user_agent=None):
 		if cls._cookies and cls._config.get("secret_key"):
@@ -70,6 +71,7 @@ class State(object):
 				data = response.json()
 				zpw = data["data"]["zpw_ws"]
 				uid = data["data"]["uid"]
+				cloud_id = data["data"].get("send2me_id")
 				phone = data["data"]["phone_number"]
 				key = data["data"]["zpw_enk"]
 				
@@ -77,7 +79,8 @@ class State(object):
 					"data": {
 						"phone_number": str(phone),
 						"secret_key": str(key),
-						"send2me_id": str(uid),
+						"account_id": str(uid),
+						"cloud_id": str(cloud_id) if cloud_id is not None else None,
 						"zpw_ws": zpw,
 					},
 				"error_code": 0
@@ -88,7 +91,8 @@ class State(object):
 					
 					if cls._config.get("secret_key"):
 						cls._loggedin = True
-						cls.cloud_id = cls._config.get("send2me_id")
+						cls.account_id = cls._config.get("account_id")
+						cls.cloud_id = cls._config.get("cloud_id")
 						cls.user_imei = imei
 						
 					else:

@@ -1,4 +1,4 @@
-# zlapi 1.1.0
+# zlapi 1.2.0
 
 Fork không chính thức của [`zlapi`](https://github.com/Its-VrxxDev/zlapi) — Zalo API (không chính thức) cho Python.
 
@@ -25,7 +25,7 @@ Nhánh hoặc tag:
 
 ```bash
 pip install git+https://github.com/taphoaneil/zlapi.git@master
-pip install git+https://github.com/taphoaneil/zlapi.git@v1.1.0
+pip install git+https://github.com/taphoaneil/zlapi.git@v1.2.0
 ```
 
 Trong `requirements.txt` của ứng dụng:
@@ -37,6 +37,27 @@ zlapi @ git+https://github.com/taphoaneil/zlapi.git@master
 ```python
 from zlapi import ZaloAPI, ImageGroup, MultiImageSendResult
 ```
+
+## My Documents / Cloud
+
+Sau khi đăng nhập, `api.cloud_id` là định danh **My Documents** do máy chủ Zalo
+trả về (`send2me_id`); nó không được suy ra từ UID tài khoản. Gửi vào My
+Documents bằng `ThreadType.CLOUD` không cần truyền `thread_id`:
+
+```python
+from zlapi.models import Message, ThreadType
+
+api.send(Message(text="Ghi chú cho chính mình"), thread_type=ThreadType.CLOUD)
+```
+
+Các callback `onMessage` thuộc My Documents cũng nhận
+`thread_type=ThreadType.CLOUD`. Nếu phiên đăng nhập không trả về
+`send2me_id`, thao tác Cloud sẽ báo lỗi thay vì gửi nhầm sang UID tài khoản.
+
+## Thay đổi 1.2.0
+
+- **My Documents / Cloud:** thêm `ThreadType.CLOUD`; dùng `send2me_id` do Zalo trả về thay vì đoán từ UID tài khoản. Gửi vào My Documents không cần `thread_id`; listener phân loại sự kiện Cloud riêng.
+- **Session:** constructor giờ nạp `cookies=` ngay cả khi `auto_login=False`, thuận tiện cho luồng `set session` rồi `login(imei=...)`.
 
 ## Thay đổi 1.1.0 so với bản gốc 1.0.2
 

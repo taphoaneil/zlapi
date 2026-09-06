@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 
 import hashlib
+import functools
+import inspect
 import json
 import logging
 import os
@@ -27,6 +29,26 @@ IMAGE_GROUP_CACHE_MAX_SIZE = 1024
 if not logging.root.handlers:
 	logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+
+def _normalize_cloud_thread(method):
+	"""Route public Cloud operations through Zalo's direct-message APIs.
+
+	Cloud is a distinct public thread type, but Zalo transports it through the
+	same endpoints as a one-to-one message.  Keeping that conversion here makes
+	the behaviour consistent for every message operation.
+	"""
+	signature = inspect.signature(method)
+
+	@functools.wraps(method)
+	def wrapped(self, *args, **kwargs):
+		bound = signature.bind_partial(self, *args, **kwargs)
+		if bound.arguments.get("thread_type") == ThreadType.CLOUD:
+			bound.arguments["thread_id"] = self._require_cloud_id()
+			bound.arguments["thread_type"] = ThreadType.USER
+		return method(*bound.args, **bound.kwargs)
+
+	return wrapped
+
 class ZaloAPI(object):
 	def __init__(self, phone=None, password=None, imei=None, cookies=None, user_agent=None, auto_login=True):
 		"""Initialize and log in the client.
@@ -52,11 +74,12 @@ class ZaloAPI(object):
 		self._image_groups = {}
 		self._completed_image_groups = OrderedDict()
 		self._image_groups_lock = threading.Lock()
-		
+		if cookies:
+			self.setSession(cookies)
+
 		if auto_login:
 			if (
-				not cookies 
-				or not self.setSession(cookies) 
+				not self.getSession()
 				or not self.isLoggedIn()
 			):
 				self.login(phone, password, imei, user_agent)
@@ -65,6 +88,26 @@ class ZaloAPI(object):
 	def uid(self):
 		"""The ID of the client."""
 		return self.user_id
+
+	def _require_cloud_id(self):
+		"""Return the server-provided My Documents ID or fail safely."""
+		if not self.cloud_id:
+			raise ZaloUserError(
+				"My Documents (Cloud) ID is unavailable. Log in again with a session "
+				"that returns send2me_id before using ThreadType.CLOUD."
+			)
+		return str(self.cloud_id)
+
+	def _direct_thread_context(self, message_object):
+		"""Classify a websocket direct-message event as USER or CLOUD."""
+		cloud_id = str(self.cloud_id) if self.cloud_id else None
+		uid_from = getattr(message_object, "uidFrom", None)
+		id_to = getattr(message_object, "idTo", None)
+		candidates = [str(value) for value in (id_to, uid_from) if value not in (None, "", 0, "0")]
+		if cloud_id and cloud_id in candidates:
+			return cloud_id, ThreadType.CLOUD
+		thread_id = str(int(uid_from) or id_to)
+		return thread_id, ThreadType.USER
 	
 	"""
 	INTERNAL REQUEST METHODS
@@ -309,6 +352,7 @@ class ZaloAPI(object):
 	ATTACHMENTS METHODS
 	"""
 	
+	@_normalize_cloud_thread
 	def _uploadImage(self, filePath, thread_id, thread_type):
 		"""Upload images to Zalo.
 			
@@ -2571,6 +2615,7 @@ class ZaloAPI(object):
 	SEND METHODS
 	"""
 	
+	@_normalize_cloud_thread
 	def send(self, message, thread_id, thread_type=ThreadType.USER, mark_message=None, ttl=0):
 		"""Send message to a thread.
 			
@@ -2592,6 +2637,7 @@ class ZaloAPI(object):
 		else:
 			return self.sendMessage(message, thread_id, thread_type, mark_message, ttl)
 	
+	@_normalize_cloud_thread
 	def sendMessage(self, message, thread_id, thread_type, mark_message=None, ttl=0):
 		"""Send message to a thread (user/group).
 			
@@ -2667,6 +2713,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def replyTo(self, replyMsg, message, thread_id, thread_type, ttl=0):
 		"""Reply message in group by ID.
 			
@@ -2810,6 +2857,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def undoMessage(self, msgId, cliMsgId, thread_id, thread_type):
 		"""Undo message from the client by ID.
 			
@@ -2878,6 +2926,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendReaction(self, messageObject, reactionIcon, thread_id, thread_type, reactionType=75):
 		"""Reaction message by ID.
 			
@@ -2954,6 +3003,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendMultiReaction(self, reactionObj, reactionIcon, thread_id, thread_type, reactionType=75):
 		"""Reaction message by ID.
 			
@@ -3040,6 +3090,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendRemoteFile(self, fileUrl, thread_id, thread_type, fileName="default", fileSize=None, extension="vrxx", ttl=0):
 		"""Send File to a User/Group with url.
 			
@@ -3134,6 +3185,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendRemoteVideo(self, videoUrl, thumbnailUrl, duration, thread_id, thread_type, width=1280, height=720, message=None, ttl=0):
 		"""Send (Forward) video to a User/Group with url.
 		
@@ -3244,6 +3296,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendRemoteVoice(self, voiceUrl, thread_id, thread_type, fileSize=None, ttl=0):
 		"""Send voice by url.
 			
@@ -3321,6 +3374,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendLocalImage(self, imagePath, thread_id, thread_type, width=2560, height=2560, message=None, custom_payload=None, ttl=0):
 		"""Send Image to a User/Group with local file.
 			
@@ -3419,6 +3473,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def _buildMultiLocalImagePayload(self, uploadImage, thread_id, thread_type, width, height, message, ttl, groupLayoutId, totalItemInGroup, idInGroup):
 		"""Build one unencoded payload for a prepared image in an album."""
 		imageUrl = uploadImage.get("normalUrl") or uploadImage.get("hdUrl") or uploadImage.get("oriUrl")
@@ -3462,6 +3517,7 @@ class ZaloAPI(object):
 
 		return payload
 
+	@_normalize_cloud_thread
 	def sendMultiLocalImage(self, imagePathList, thread_id, thread_type, width=None, height=None, message=None, ttl=0):
 		"""Send Multiple Image to a User/Group with local file.
 			
@@ -3544,6 +3600,7 @@ class ZaloAPI(object):
 
 		return MultiImageSendResult(sent=sent, failed=failed)
 	
+	@_normalize_cloud_thread
 	def sendLocalGif(self, gifPath, thumbnailUrl, thread_id, thread_type, gifName="vrxx.gif", width=500, height=500, ttl=0):
 		"""Send Gif to a User/Group with local file.
 			
@@ -3632,6 +3689,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendSticker(self, stickerType, stickerId, cateId, thread_id, thread_type, ttl=0):
 		"""Send Sticker to a User/Group.
 			
@@ -3704,6 +3762,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 		
+	@_normalize_cloud_thread
 	def sendCustomSticker(
 		self,
 		staticImgUrl,
@@ -3813,6 +3872,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendLink(self, linkUrl, title, thread_id, thread_type, thumbnailUrl=None, domainUrl=None, desc=None, message=None, ttl=0):
 		"""Send link to a User/Group with url.
 			
@@ -3962,6 +4022,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def sendBusinessCard(self, userId, qrCodeUrl, thread_id, thread_type, phone=None, ttl=0):
 		"""Send business card by user ID.
 			
@@ -4040,6 +4101,7 @@ class ZaloAPI(object):
 	END SEND METHODS
 	"""
 	
+	@_normalize_cloud_thread
 	def setTyping(self, thread_id, thread_type):
 		"""Set users typing status.
 			
@@ -4084,6 +4146,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def markAsDelivered(
 		self,
 		msgId,
@@ -4157,6 +4220,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
+	@_normalize_cloud_thread
 	def markAsRead(
 		self,
 		msgId,
@@ -4319,10 +4383,11 @@ class ZaloAPI(object):
 				
 				elif version == 1 and cmd == 501 and subCmd == 0:
 					userMsgs = parsedData["data"]["msgs"]
-					
+
 					for message in userMsgs:
 						msgObj = MessageObject.fromDict(message, None)
-						self._handle_incoming_message(msgObj.msgId, str(int(msgObj.uidFrom) or self.user_id), msgObj.content, msgObj, str(int(msgObj.uidFrom) or msgObj.idTo), ThreadType.USER)
+						thread_id, thread_type = self._direct_thread_context(msgObj)
+						self._handle_incoming_message(msgObj.msgId, str(int(msgObj.uidFrom) or self.user_id), msgObj.content, msgObj, thread_id, thread_type)
 				
 				elif version == 1 and cmd == 521 and subCmd == 0:
 					groupMsgs = parsedData["data"]["groupMsgs"]
@@ -4364,7 +4429,8 @@ class ZaloAPI(object):
 					for react in reacts:
 						react["content"] = json.loads(react["content"])
 						msgObj = MessageObject.fromDict(react, None)
-						self._handle_incoming_message(msgObj.msgId, str(int(msgObj.uidFrom) or self.user_id), msgObj.content, msgObj, str(int(msgObj.uidFrom) or msgObj.idTo), ThreadType.USER)
+						thread_id, thread_type = self._direct_thread_context(msgObj)
+						self._handle_incoming_message(msgObj.msgId, str(int(msgObj.uidFrom) or self.user_id), msgObj.content, msgObj, thread_id, thread_type)
 					
 					for reactGroup in reactGroups:
 						reactGroup["content"] = json.loads(reactGroup["content"])
