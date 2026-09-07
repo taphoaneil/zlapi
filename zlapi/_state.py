@@ -66,7 +66,11 @@ class State(object):
 			
 		if cls._cookies:
 			try:
-				url = f"https://wpa.chat.zalo.me/api/login/getLoginInfo?imei={imei}&type=30&client_version=645&computer_name=Web&ts={_util.now()}"
+				url = (
+					f"https://wpa.chat.zalo.me/api/login/getLoginInfo"
+					f"?imei={imei}&type={_util.ZPW_TYPE}&client_version={_util.ZPW_VER}"
+					f"&computer_name=Web&ts={_util.now()}"
+				)
 				response = requests.get(url, headers=headers, cookies=cls._cookies)
 				data = response.json()
 				zpw = data["data"]["zpw_ws"]

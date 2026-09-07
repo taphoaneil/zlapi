@@ -61,12 +61,15 @@ class CloudThreadTests(unittest.TestCase):
         )
         state = State()
         state.set_cookies({"session": "test"})
-        with patch("zlapi._state.requests.get", return_value=response):
+        with patch("zlapi._state.requests.get", return_value=response) as mock_get:
             state.login(None, None, "test-imei")
 
         self.assertEqual(state.account_id, "account-1")
         self.assertEqual(state.cloud_id, "cloud-9")
         self.assertEqual(state.user_id, "account-1")
+        login_url = mock_get.call_args[0][0]
+        self.assertIn("client_version=647", login_url)
+        self.assertNotIn("client_version=645", login_url)
 
 
 if __name__ == "__main__":

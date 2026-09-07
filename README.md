@@ -1,4 +1,4 @@
-# zlapi 1.2.0
+# zlapi 1.2.1
 
 Fork không chính thức của [`zlapi`](https://github.com/Its-VrxxDev/zlapi) — Zalo API (không chính thức) cho Python.
 
@@ -25,7 +25,7 @@ Nhánh hoặc tag:
 
 ```bash
 pip install git+https://github.com/taphoaneil/zlapi.git@master
-pip install git+https://github.com/taphoaneil/zlapi.git@v1.2.0
+pip install git+https://github.com/taphoaneil/zlapi.git@v1.2.1
 ```
 
 Trong `requirements.txt` của ứng dụng:
@@ -53,6 +53,10 @@ api.send(Message(text="Ghi chú cho chính mình"), thread_type=ThreadType.CLOUD
 Các callback `onMessage` thuộc My Documents cũng nhận
 `thread_type=ThreadType.CLOUD`. Nếu phiên đăng nhập không trả về
 `send2me_id`, thao tác Cloud sẽ báo lỗi thay vì gửi nhầm sang UID tài khoản.
+
+## Thay đổi 1.2.1
+
+- **Protocol Zalo Web:** `zpw_ver` và login `client_version` lên **647**; hằng số `ZPW_VER` / `ZPW_TYPE` trong `_util` dùng chung cho login và mọi request API.
 
 ## Thay đổi 1.2.0
 

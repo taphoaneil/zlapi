@@ -27,6 +27,10 @@ HEADERS = {
 #: Default cookies
 COOKIES = {}
 
+#: Zalo Web protocol version (login `client_version` and API `zpw_ver`)
+ZPW_VER = 647
+ZPW_TYPE = 30
+
 
 def now():
 	return int(time.time() * 1000)
