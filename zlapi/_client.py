@@ -2036,10 +2036,9 @@ class ZaloAPI(object):
 				"type": 2,
 				"color": -14540254,
 				"emoji": "📌",
-				"startTime": -1,
-				"duration": -1,
-				"repeat": 0,
-				"src": -1,
+				# Zalo Web uses zero for a pin with no scheduled expiry. Unlike -1,
+				# it can be removed later through the current unpin endpoint.
+				"duration": 0,
 				"imei": self._imei,
 				"pinAct": 1
 			}
@@ -2215,6 +2214,8 @@ class ZaloAPI(object):
 					"topicId": str(pinId),
 					"topicType": 2
 				},
+				# The board response currently exposes this as ``createTime``. It is
+				# still named ``boardVersion`` by the unpin endpoint.
 				"boardVersion": int(pinTime)
 			})
 		}
@@ -2668,10 +2669,11 @@ class ZaloAPI(object):
 			"nretry": 0
 		}
 		
+		client_id = _util.now()
 		payload = {
 			"params": {
 				"message": message.text,
-				"clientId": _util.now(),
+				"clientId": client_id,
 				"imei": self._imei,
 				"ttl": ttl
 			}
@@ -2711,11 +2713,16 @@ class ZaloAPI(object):
 				except:
 					results = {"error_code": 1337, "error_message": results}
 			
-			return (
-				Group.fromDict(results, None) 
-				if thread_type == ThreadType.GROUP else 
+			result = (
+				Group.fromDict(results, None)
+				if thread_type == ThreadType.GROUP else
 				User.fromDict(results, None)
 			)
+			# Zalo's group-send response may contain only msgId, but the
+			# group-board pin API also requires the client ID used to send it.
+			if not getattr(result, "cliMsgId", None):
+				result.cliMsgId = str(client_id)
+			return result
 			
 		error_code = data.get("error_code")
 		error_message = data.get("error_message") or data.get("data")

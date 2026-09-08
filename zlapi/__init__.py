@@ -7,7 +7,7 @@ from .models import *
 from ._client import ZaloAPI
 
 __title__ = "zlapi"
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 __description__ = "Zalo API (Website) for Python"
 
 __copyright__ = "Copyright 2024 by Vexx"

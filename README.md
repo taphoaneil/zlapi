@@ -1,4 +1,4 @@
-# zlapi 1.2.1
+# zlapi 1.2.2
 
 Fork không chính thức của [`zlapi`](https://github.com/Its-VrxxDev/zlapi) — Zalo API (không chính thức) cho Python.
 
@@ -25,7 +25,7 @@ Nhánh hoặc tag:
 
 ```bash
 pip install git+https://github.com/taphoaneil/zlapi.git@master
-pip install git+https://github.com/taphoaneil/zlapi.git@v1.2.1
+pip install git+https://github.com/taphoaneil/zlapi.git@v1.2.2
 ```
 
 Trong `requirements.txt` của ứng dụng:
@@ -53,6 +53,12 @@ api.send(Message(text="Ghi chú cho chính mình"), thread_type=ThreadType.CLOUD
 Các callback `onMessage` thuộc My Documents cũng nhận
 `thread_type=ThreadType.CLOUD`. Nếu phiên đăng nhập không trả về
 `send2me_id`, thao tác Cloud sẽ báo lỗi thay vì gửi nhầm sang UID tài khoản.
+
+## Thay đổi 1.2.2
+
+- **Ghim tin nhắn nhóm:** dùng payload board hiện tại của Zalo cho ghim không hẹn giờ (`duration: 0`), thay vì các trường legacy không còn được endpoint chấp nhận.
+- **Gỡ ghim:** dùng bản ghi board hiện tại (`id`, `params`, `createTime`) để gọi `unpinv2` đúng `topicId` và `boardVersion`.
+- **Gửi tin nhắn nhóm:** khi API chỉ trả `msgId`, `sendMessage` trả thêm chính `clientId` của request làm `cliMsgId`; ứng dụng vì vậy vẫn ghim được tin vừa gửi.
 
 ## Thay đổi 1.2.1
 
