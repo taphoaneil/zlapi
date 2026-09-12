@@ -134,6 +134,43 @@ class ZaloAPI(object):
 		else:
 			self.onMessage(mid, author_id, message, message_object, thread_id, thread_type)
 
+	def _handle_ws_controls(self, controls):
+		"""Dispatch controls independently so one bad event cannot drop a batch."""
+		pin_events = {
+			"pin_create": EventType.NEW_PIN_TOPIC,
+			"pin_unpin": EventType.UNPIN_TOPIC,
+		}
+		for control in controls:
+			try:
+				content = control.get("content", {})
+				act_type, act = content.get("act_type"), content.get("act")
+				if act_type == "group":
+					if act == "join_reject":
+						continue
+					data = self._pin_json(content["data"])
+					event = EventObject.fromDict(data)
+					event_type = _util.getGroupEventType(act)
+					if self.thread:
+						pool.submit(self.onEvent, event, event_type)
+					else:
+						self.onEvent(event, event_type)
+				elif act_type == "fr" and act in pin_events:
+					data = self._pin_json(content["data"])
+					if not isinstance(data, dict):
+						raise ValueError("Invalid direct-message pin event")
+					data = dict(data)
+					if "topic" in data:
+						data["topic"] = self._normalize_pin_topic(data["topic"])
+					event = EventObject.fromDict(data)
+					thread_id = self._pin_id(data.get("conversationId"), "conversationId")
+					author_id = self._pin_id(data.get("actorId"), "actorId")
+					msg = MessageObject.fromDict(dict(control), None)
+					msg.event_type = pin_events[act]
+					msg.event_data = event
+					self._emit_message(control.get("msgId"), author_id, event, msg, thread_id, ThreadType.USER)
+			except Exception as error:
+				self.onErrorCallBack(error)
+
 	def _parse_image_group_details(self, message, message_object=None):
 		"""Return album metadata for a grouped image message, otherwise ``None``.
 
@@ -912,6 +949,130 @@ class ZaloAPI(object):
 		
 		return response
 	
+	@staticmethod
+	def _pin_json(value):
+		return json.loads(value) if isinstance(value, str) else value
+
+	@classmethod
+	def _normalize_pin_topic(cls, value):
+		topic = cls._pin_json(value)
+		if not isinstance(topic, dict):
+			raise ValueError("Invalid pin topic: expected an object")
+		topic = dict(topic)
+		if "params" in topic:
+			topic["params"] = cls._pin_json(topic["params"])
+		return topic
+
+	@staticmethod
+	def _pin_id(value, name):
+		if value is None or isinstance(value, bool) or str(value).strip() in ("", "0"):
+			raise ZaloUserError(f"{name} is required")
+		return str(value)
+
+	@staticmethod
+	def _pin_version(value):
+		if isinstance(value, bool) or not isinstance(value, (int, str)):
+			raise ZaloUserError("Pin version must be a non-negative integer")
+		try:
+			version = int(value)
+		except ValueError as error:
+			raise ZaloUserError("Pin version must be a non-negative integer") from error
+		if version < 0:
+			raise ZaloUserError("Pin version must be a non-negative integer")
+		return version
+
+	def _friend_board_request(self, action, payload):
+		"""Decode transport/encrypted envelopes without discarding board version."""
+		response = self._get(
+			f"https://friendboard-wpa.chat.zalo.me/api/friendboard/{action}",
+			params={"zpw_ver": _util.ZPW_VER, "zpw_type": _util.ZPW_TYPE,
+				"params": self._encode(payload)},
+		)
+		try:
+			outer = response.json()
+			if outer.get("error_code") != 0:
+				raise ZaloAPIException(f"Error #{outer.get('error_code')}: {outer.get('error_message')}")
+			result = self._pin_json(self._decode(outer["data"]))
+			# The decrypted response may contain another API envelope.
+			if isinstance(result, dict) and "error_code" in result:
+				if result["error_code"] != 0:
+					raise ZaloAPIException(f"Error #{result['error_code']}: {result.get('error_message')}")
+				if "version" not in result:
+					result = self._pin_json(result.get("data"))
+			if not isinstance(result, dict):
+				raise ValueError("Expected a friend board response object")
+			if result.get("error_code", 0) != 0:
+				raise ZaloAPIException(f"Error #{result['error_code']}: {result.get('error_message')}")
+			return result
+		except (ValueError, TypeError, KeyError, AttributeError) as error:
+			raise ZaloAPIException(f"Invalid friend board response: {error}") from error
+
+	def getUserPinMsg(self, userId):
+		"""Return User(data=[pin topics], version=...) in server order.
+
+		Topic records and their JSON params are decoded. Only pinned messages
+		(type 2) are returned; the board version is preserved for unpinUserMsg.
+		"""
+		result = self._friend_board_request("list", {
+			"conversationId": self._pin_id(userId, "userId"), "version": 0,
+		})
+		try:
+			result = dict(result)
+			topics = self._pin_json(result["data"])
+			if not isinstance(topics, list):
+				raise ValueError("Expected a pin list")
+			topics = [self._normalize_pin_topic(topic) for topic in topics]
+			result["data"] = [topic for topic in topics if str(topic.get("type")) == "2"]
+			return User.fromDict(result, None)
+		except (ValueError, TypeError, KeyError) as error:
+			raise ZaloAPIException(f"Invalid friend board list: {error}") from error
+
+	def getLatestUserPinMsg(self, userId):
+		"""Return the first currently pinned message in server order, or None."""
+		pins = self.getUserPinMsg(userId).data
+		return pins[0] if pins else None
+
+	def pinUserMsg(self, pinMsg, userId, version=0):
+		"""Pin a received/sent MessageObject in a one-to-one chat without expiry.
+
+		pinMsg must include msgType, msgId, cliMsgId, uidFrom, dName and content.
+		Returns User(data=created topic, version=...). No callback is synthesized;
+		onMessage receives the server's pin_create control while listening.
+		"""
+		user_id = self._pin_id(userId, "userId")
+		version = self._pin_version(version)
+		self._pin_id(getattr(pinMsg, "msgId", None), "msgId")
+		self._pin_id(getattr(pinMsg, "cliMsgId", None), "cliMsgId")
+		params = self._pin_message_params(pinMsg)
+		if params is None:
+			raise ZaloUserError(f"Unsupported pin message type: {pinMsg.msgType}")
+		result = self._friend_board_request("create", {
+			"conversationId": user_id, "version": version, "lang": "vi",
+			"topic": {"type": 2, "color": -14540254, "emoji": "📌",
+				"duration": 0, "imei": self._imei, "pinAct": 1, "src": -1,
+				"params": params},
+		})
+		try:
+			if result.get("data") is not None:
+				result["data"] = self._normalize_pin_topic(result["data"])
+			return User.fromDict(result, None)
+		except (ValueError, TypeError) as error:
+			raise ZaloAPIException(f"Invalid created pin: {error}") from error
+
+	def unpinUserMsg(self, pinId, pinVersion, userId):
+		"""Unpin a topic using the board version returned by getUserPinMsg.
+
+		pinId is the pin record's id, not its message ID. Returns the decoded
+		User response including the new version. Errors (including stale board
+		versions) raise ZaloAPIException; refresh the list before retrying.
+		"""
+		result = self._friend_board_request("multi_unpin", {
+			"conversationId": self._pin_id(userId, "userId"),
+			"topics": [{"topicId": self._pin_id(pinId, "pinId"), "topicType": 2}],
+			"version": self._pin_version(pinVersion), "lang": "vi",
+		})
+		return User.fromDict(result, None)
+
 	def getGroupNote(self, groupId, page=1, count=20, last_id=0, last_type=0):
 		"""Get group notes by ID.
 			
@@ -2011,42 +2172,11 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
-	def pinGroupMsg(self, pinMsg, groupId):
-		"""Pin message in group by ID.
-		
-		Args:
-			pinMsg (Message): Message Object to pin
-			groupId (int | str): Group ID to pin message
-		
-		Returns:
-			object: `Group` pin message status
-			dict: A dictionary containing error_code & responses if failed
-		
-		Raises:
-			ZaloAPIException: If request failed
-		"""
-		params = {
-			"zpw_ver": _util.ZPW_VER,
-			"zpw_type": _util.ZPW_TYPE
-		}
-		
-		payload = {
-			"params": {
-				"grid": str(groupId),
-				"type": 2,
-				"color": -14540254,
-				"emoji": "📌",
-				# Zalo Web uses zero for a pin with no scheduled expiry. Unlike -1,
-				# it can be removed later through the current unpin endpoint.
-				"duration": 0,
-				"imei": self._imei,
-				"pinAct": 1
-			}
-		}
-		
+	def _pin_message_params(self, pinMsg):
+		"""Serialize message content shared by group and direct-message pins."""
 		if pinMsg.msgType == "webchat":
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2057,7 +2187,7 @@ class ZaloAPI(object):
 		
 		elif pinMsg.msgType == "chat.voice":
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2067,7 +2197,7 @@ class ZaloAPI(object):
 		
 		elif pinMsg.msgType in ["chat.photo", "chat.video.msg"]:
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2079,7 +2209,7 @@ class ZaloAPI(object):
 		
 		elif pinMsg.msgType == "chat.sticker":
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2095,7 +2225,7 @@ class ZaloAPI(object):
 		elif pinMsg.msgType in ["chat.recommended", "chat.link"]:
 			
 			extra = json.loads(pinMsg.content.params)
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2125,7 +2255,7 @@ class ZaloAPI(object):
 		
 		elif pinMsg.msgType == "chat.location.new":
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2137,7 +2267,7 @@ class ZaloAPI(object):
 		elif pinMsg.msgType == "share.file":
 			
 			extra = json.loads(pinMsg.content.params)
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2158,7 +2288,7 @@ class ZaloAPI(object):
 		
 		elif pinMsg.msgType == "chat.gif":
 			
-			payload["params"]["params"] = json.dumps({
+			return json.dumps({
 				"client_msg_id": pinMsg.cliMsgId,
 				"global_msg_id": pinMsg.msgId,
 				"senderUid": str(int(pinMsg.uidFrom) or self.user_id),
@@ -2167,6 +2297,45 @@ class ZaloAPI(object):
 				"msg_type": _util.getClientMessageType(pinMsg.msgType)
 			})
 		
+		return None
+
+	def pinGroupMsg(self, pinMsg, groupId):
+		"""Pin message in group by ID.
+
+		Args:
+			pinMsg (Message): Message Object to pin
+			groupId (int | str): Group ID to pin message
+
+		Returns:
+			object: `Group` pin message status
+			dict: A dictionary containing error_code & responses if failed
+
+		Raises:
+			ZaloAPIException: If request failed
+		"""
+		params = {
+			"zpw_ver": _util.ZPW_VER,
+			"zpw_type": _util.ZPW_TYPE
+		}
+
+		payload = {
+			"params": {
+				"grid": str(groupId),
+				"type": 2,
+				"color": -14540254,
+				"emoji": "📌",
+				# Zalo Web uses zero for a pin with no scheduled expiry. Unlike -1,
+				# it can be removed later through the current unpin endpoint.
+				"duration": 0,
+				"imei": self._imei,
+				"pinAct": 1
+			}
+		}
+
+		message_params = self._pin_message_params(pinMsg)
+		if message_params is not None:
+			payload["params"]["params"] = message_params
+
 		payload["params"] = self._encode(payload["params"])
 		response = self._post("https://groupboard-wpa.chat.zalo.me/api/board/topic/createv2", params=params, data=payload)
 		data = response.json()
@@ -4423,21 +4592,8 @@ class ZaloAPI(object):
 						self._handle_incoming_message(msgObj.msgId, str(int(msgObj.uidFrom) or self.user_id), msgObj.content, msgObj, str(int(msgObj.idTo) or self.user_id), ThreadType.GROUP)
 				
 				elif version == 1 and cmd == 601 and subCmd == 0:
-					controls = parsedData["data"].get("controls", [])
-					for control in controls:
-						if control["content"]["act_type"] == "group":
-							
-							if control["content"]["act"] == "join_reject":
-								continue
-							
-							groupEventData = json.loads(control["content"]["data"]) if isinstance(control["content"]["data"], str) else control["content"]["data"]
-							groupEventType = _util.getGroupEventType(control["content"]["act"])
-							event_data = EventObject.fromDict(groupEventData)
-							if self.thread:
-								pool.submit(self.onEvent, event_data, groupEventType)
-							else:
-								self.onEvent(event_data, groupEventType)
-				
+					self._handle_ws_controls(parsedData["data"].get("controls", []))
+
 				elif cmd == 612:
 					reacts = parsedData["data"].get("reacts", [])
 					reactGroups = parsedData["data"].get("reactGroups", [])

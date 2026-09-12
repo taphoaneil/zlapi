@@ -31,3 +31,5 @@ class GroupEventType(Enum):
 
 class EventType(Enum):
 	REACTION = auto()
+	NEW_PIN_TOPIC = auto()
+	UNPIN_TOPIC = auto()
