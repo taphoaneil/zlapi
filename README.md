@@ -1,4 +1,4 @@
-# zlapi 1.3.0
+# zlapi 1.4.0
 
 Fork không chính thức của [`zlapi`](https://github.com/Its-VrxxDev/zlapi) — Zalo API (không chính thức) cho Python.
 
@@ -25,7 +25,7 @@ Nhánh hoặc tag:
 
 ```bash
 pip install git+https://github.com/taphoaneil/zlapi.git@master
-pip install git+https://github.com/taphoaneil/zlapi.git@v1.3.0
+pip install git+https://github.com/taphoaneil/zlapi.git@v1.4.0
 ```
 
 Trong `requirements.txt` của ứng dụng:
@@ -53,6 +53,40 @@ api.send(Message(text="Ghi chú cho chính mình"), thread_type=ThreadType.CLOUD
 Các callback `onMessage` thuộc My Documents cũng nhận
 `thread_type=ThreadType.CLOUD`. Nếu phiên đăng nhập không trả về
 `send2me_id`, thao tác Cloud sẽ báo lỗi thay vì gửi nhầm sang UID tài khoản.
+
+## Thay đổi 1.4.0
+
+### Runtime an toàn cho nhiều session
+
+- Request login mặc định dùng timeout `(10, 30)` và các API HTTP dùng `(10, 60)`;
+  truyền `None` để tắt timeout hoặc truyền timeout riêng trên request để ghi đè.
+- Khi Zalo đá session vì có kết nối khác, listener đóng websocket rồi gọi
+  `onErrorCallBack(ZaloSessionKicked(...))`; thư viện không còn gửi `SIGTERM`
+  tới toàn bộ process.
+- `sendMultiLocalImage` chỉ gửi mỗi POST một lần. Nếu response bị timeout sau
+  khi Zalo có thể đã nhận ảnh, ảnh đó là failure `send` và các ảnh sau là
+  `Not attempted`, thay vì có nguy cơ đăng album trùng.
+- `sendWebsocketPing()` gửi đúng một ping. Có thể truyền `ping_scheduler` vào
+  `ZaloAPI` để dùng scheduler của ứng dụng; callable nhận `(delay_seconds,
+  callback)` và trả handle có `cancel()`. Nếu không truyền, thư viện dùng
+  `threading.Timer` daemon.
+
+```python
+from zlapi import ZaloAPI, ZaloSessionKicked
+
+def schedule(delay_seconds, callback):
+    # Trả về một handle có .cancel(), ví dụ handle của scheduler ứng dụng.
+    return scheduler.schedule_later(delay_seconds, callback)
+
+class Bot(ZaloAPI):
+    def onErrorCallBack(self, error, ts=None):
+        if isinstance(error, ZaloSessionKicked):
+            mark_this_account_unhealthy(error)
+            return
+        super().onErrorCallBack(error, ts)
+
+api = Bot(auto_login=False, ping_scheduler=schedule)
+```
 
 ## Thay đổi 1.3.0
 

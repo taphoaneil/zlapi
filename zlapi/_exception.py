@@ -18,6 +18,14 @@ class ZaloLoginError(ZaloAPIException):
 	def __init__(self, message=None):
 		self.message = message
 		super().__init__(message)
+
+
+class ZaloSessionKicked(ZaloAPIException):
+	"""Raised when Zalo closes this session because another connection took it."""
+
+	def __init__(self, message=None):
+		self.message = message
+		super().__init__(message)
 		
 
 class ZaloUserError(ZaloAPIException):

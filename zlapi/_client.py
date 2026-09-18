@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import random
-import signal
 import struct
 import threading
 import time
@@ -58,7 +57,18 @@ def _normalize_cloud_thread(method):
 	return wrapped
 
 class ZaloAPI(object):
-	def __init__(self, phone=None, password=None, imei=None, cookies=None, user_agent=None, auto_login=True):
+	def __init__(
+		self,
+		phone=None,
+		password=None,
+		imei=None,
+		cookies=None,
+		user_agent=None,
+		auto_login=True,
+		login_timeout=(10, 30),
+		request_timeout=(10, 60),
+		ping_scheduler=None,
+	):
 		"""Initialize and log in the client.
 		
 		Args:
@@ -68,6 +78,10 @@ class ZaloAPI(object):
 			auto_login (bool): Automatically log in when initializing ZaloAPI (Default: True)
 			user_agent (str): Custom user agent to use when sending requests. If `None`, user agent will be chosen from a premade list
 			cookies (dict): Cookies from a previous session (required for cookie login). Loading cookies does not log in; ``login(imei=...)`` binds IMEI and websocket.
+			login_timeout: Default timeout for the cookie-login request. ``None`` disables it.
+			request_timeout: Default timeout for normal HTTP requests. ``None`` disables it.
+			ping_scheduler: Optional callable ``(delay_seconds, callback) -> handle``.
+				The returned handle must provide ``cancel()``. By default a daemon Timer is used.
 			
 		Raises:
 			ZaloLoginError: On failed login
@@ -76,9 +90,13 @@ class ZaloAPI(object):
 		self.user_id = None
 		self.cloud_id = None
 		
-		self._state = _state.State()
+		if ping_scheduler is not None and not callable(ping_scheduler):
+			raise TypeError("ping_scheduler must be callable")
+		self._state = _state.State(login_timeout=login_timeout, request_timeout=request_timeout)
 		self._listening = False
 		self.thread = False
+		self.ping_interval = None
+		self._ping_scheduler = ping_scheduler or self._schedule_daemon_timer
 		self._image_groups = {}
 		self._completed_image_groups = OrderedDict()
 		self._image_groups_lock = threading.Lock()
@@ -3715,6 +3733,8 @@ class ZaloAPI(object):
 			
 		Returns:
 			MultiImageSendResult: Successful responses and failures for individual images.
+			A send POST is attempted once only. A failed or timed-out send is reported
+			without retrying because Zalo may already have accepted the image.
 		
 		Raises:
 			ZaloAPIException: If request failed
@@ -3763,24 +3783,21 @@ class ZaloAPI(object):
 			except Exception as error:
 				failed.append(ImageSendFailure(index, imagePath, "upload", str(error)))
 				continue
-			for attempt in range(2):
-				try:
-					sent.append(self.sendLocalImage(
-						imagePath, thread_id, thread_type, imageWidth, imageHeight, message,
-						custom_payload=payload, ttl=ttl,
+			try:
+				sent.append(self.sendLocalImage(
+					imagePath, thread_id, thread_type, imageWidth, imageHeight, message,
+					custom_payload=payload, ttl=ttl,
+				))
+			except Exception as error:
+				failed.append(ImageSendFailure(index, imagePath, "send", str(error)))
+				for remainingIndex, remainingPath, _, _, _ in prepared[idInGroup + 1:]:
+					failed.append(ImageSendFailure(
+						remainingIndex,
+						remainingPath,
+						"send",
+						"Not attempted because a previous image could not be sent.",
 					))
-					break
-				except Exception as error:
-					if attempt == 1:
-						failed.append(ImageSendFailure(index, imagePath, "send", str(error)))
-						for remainingIndex, remainingPath, _, _, _ in prepared[idInGroup + 1:]:
-							failed.append(ImageSendFailure(
-								remainingIndex,
-								remainingPath,
-								"send",
-								"Not attempted because a previous image could not be sent.",
-							))
-						return MultiImageSendResult(sent=sent, failed=failed)
+				return MultiImageSendResult(sent=sent, failed=failed)
 
 		return MultiImageSendResult(sent=sent, failed=failed)
 	
@@ -4517,18 +4534,13 @@ class ZaloAPI(object):
 
 		def on_close(ws, status_code, msg):
 			self._listening = False
-			if getattr(self, "ping_interval", None):
-				self.ping_interval.cancel()
-				self.ping_interval = None
+			self._cancel_ping_schedule()
 		
 		
 		def on_error(ws, error):
 			if isinstance(error, KeyboardInterrupt):
 				ws.close()
 				_log(logging.WARNING, "listen stop", reason="keyboard")
-				pid = os.getpid()
-				os.kill(pid, signal.SIGTERM)
-			
 			self.onErrorCallBack(error)
 		
 		
@@ -4549,9 +4561,7 @@ class ZaloAPI(object):
 				if version == 1 and cmd == 1 and subCmd == 1 and "key" in parsed:
 					self.ws_key = parsed["key"]
 				
-					if hasattr(self, "ping_interval") and self.ping_interval:
-						self.ping_interval.cancel()
-					
+					self._cancel_ping_schedule()
 					self.ws_ping_scheduler()
 					return
 				
@@ -4563,8 +4573,8 @@ class ZaloAPI(object):
 				if version == 1 and cmd == 3000 and subCmd == 0:
 					_log(logging.WARNING, "listen kick", reason="other_connection")
 					ws.close()
-					pid = os.getpid()
-					os.kill(pid, signal.SIGTERM)
+					self.onErrorCallBack(ZaloSessionKicked("Zalo session was kicked by another connection."))
+					return
 				
 				elif version == 1 and cmd == 501 and subCmd == 0:
 					userMsgs = parsedData["data"]["msgs"]
@@ -4631,7 +4641,21 @@ class ZaloAPI(object):
 		ws.run_forever(reconnect=reconnect)
 	
 	
-	def ws_ping_scheduler(self):
+	@staticmethod
+	def _schedule_daemon_timer(delay_seconds, callback):
+		timer = threading.Timer(delay_seconds, callback)
+		timer.daemon = True
+		timer.start()
+		return timer
+
+	def _cancel_ping_schedule(self):
+		handle = getattr(self, "ping_interval", None)
+		self.ping_interval = None
+		if handle is not None:
+			handle.cancel()
+
+	def sendWebsocketPing(self):
+		"""Send one websocket keepalive ping without scheduling another one."""
 		payload = {
 			"version": 1,
 			"cmd": 2,
@@ -4643,9 +4667,15 @@ class ZaloAPI(object):
 		header = struct.pack("<BIB", payload["version"], payload["cmd"], payload["subCmd"])
 		data = header + encoded_data
 		self.ws.send(data, websocket.ABNF.OPCODE_BINARY)
-		
-		self.ping_interval = threading.Timer(3 * 60, self.ws_ping_scheduler)
-		self.ping_interval.start()
+
+	def ws_ping_scheduler(self):
+		"""Send one ping and schedule the next keepalive after three minutes."""
+		self.sendWebsocketPing()
+		self._cancel_ping_schedule()
+		handle = self._ping_scheduler(3 * 60, self.ws_ping_scheduler)
+		if not callable(getattr(handle, "cancel", None)):
+			raise TypeError("ping_scheduler must return a handle with cancel()")
+		self.ping_interval = handle
 	
 	
 	def listen(self, thread=False, reconnect=5):

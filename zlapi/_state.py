@@ -18,11 +18,13 @@ headers = {
 	"accept-language": "vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5",
 }
 class State(object):
-	def __init__(cls):
+	def __init__(cls, *, login_timeout=(10, 30), request_timeout=(10, 60)):
 		cls._config = {}
 		cls._headers = _util.HEADERS
 		cls._cookies = _util.COOKIES
 		cls._session = requests.Session()
+		cls._login_timeout = login_timeout
+		cls._request_timeout = request_timeout
 		cls.cloud_id = None
 		cls.account_id = None
 		cls.user_imei = None
@@ -41,11 +43,13 @@ class State(object):
 		cls._config["secret_key"] = secret_key
 	
 	def _get(cls, *args, **kwargs):
+		kwargs.setdefault("timeout", cls._request_timeout)
 		sessionObj = cls._session.get(*args, **kwargs, headers=cls._headers, cookies=cls._cookies)
 		
 		return sessionObj
 		
 	def _post(cls, *args, **kwargs):
+		kwargs.setdefault("timeout", cls._request_timeout)
 		sessionObj = cls._session.post(*args, **kwargs, headers=cls._headers, cookies=cls._cookies)
 		return sessionObj
 	
@@ -71,7 +75,7 @@ class State(object):
 					f"?imei={imei}&type={_util.ZPW_TYPE}&client_version={_util.ZPW_VER}"
 					f"&computer_name=Web&ts={_util.now()}"
 				)
-				response = requests.get(url, headers=headers, cookies=cls._cookies)
+				response = requests.get(url, headers=headers, cookies=cls._cookies, timeout=cls._login_timeout)
 				data = response.json()
 				zpw = data["data"]["zpw_ws"]
 				uid = data["data"]["uid"]

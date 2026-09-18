@@ -4,6 +4,7 @@ from ._exception import (
 	ZaloAPIException,
 	ZaloUserError,
 	ZaloLoginError,
+	ZaloSessionKicked,
 	LoginMethodNotSupport,
 	EncodePayloadError,
 	DecodePayloadError
