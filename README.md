@@ -1,4 +1,4 @@
-# zlapi 1.4.0
+# zlapi 2.0.0
 
 Fork không chính thức của [`zlapi`](https://github.com/Its-VrxxDev/zlapi) — Zalo API (không chính thức) cho Python.
 
@@ -54,6 +54,37 @@ Các callback `onMessage` thuộc My Documents cũng nhận
 `thread_type=ThreadType.CLOUD`. Nếu phiên đăng nhập không trả về
 `send2me_id`, thao tác Cloud sẽ báo lỗi thay vì gửi nhầm sang UID tài khoản.
 
+## Ghim tin nhắn 2.0
+
+Chat riêng và nhóm dùng chung các hàm bên dưới; thư viện tự chọn API Zalo
+riêng cho từng loại chat. Bỏ `thread_type` (hoặc truyền `None`) để tự nhận diện:
+ưu tiên ngữ cảnh tin nhắn đã nhận, tin đã gửi qua `sendMessage`/`send` và sự kiện ghim
+trong session; nếu chưa biết,
+thư viện gọi `fetchAllGroups()` để đối chiếu ID rồi ghi nhớ kết quả. Tra cứu lỗi
+hoặc dữ liệu không hợp lệ sẽ báo lỗi trước khi gọi API ghim.
+Có thể truyền rõ `ThreadType.USER` / `ThreadType.GROUP` để bỏ qua tra cứu.
+`ThreadType.CLOUD` chưa hỗ trợ ghim.
+
+```python
+from zlapi.models import ThreadType, PinEventType
+
+created = api.pinMessage(message, thread_id)
+pins = api.getPinnedMessages(thread_id)
+if pins:
+    api.unpinMessage(pins[0].id, thread_id)
+api.unpinAllMessages(thread_id)
+
+class Bot(ZaloAPI):
+    def onPinEvent(self, event):
+        if event.type == PinEventType.CREATED:
+            print(event.thread_id, event.pin_ids)
+```
+
+`PinnedMessage.id` là ID bản ghi ghim; `params` đã được giải mã.
+`UnpinResult` ghi các mục đã gỡ, đã không còn và các lỗi riêng từng mục.
+Các API cũ `pinUserMsg`, `getUserPinMsg`, `getLatestUserPinMsg`,
+`unpinUserMsg`, `pinGroupMsg`, `getGroupPinMsg` và `unpinGroupMsg` đã bị xóa.
+
 ## Thay đổi 1.4.0
 
 ### Runtime an toàn cho nhiều session
@@ -89,6 +120,8 @@ api = Bot(auto_login=False, ping_scheduler=schedule)
 ```
 
 ## Thay đổi 1.3.0
+
+> Nội dung lịch sử của 1.3.0; các API bên dưới đã được thay bằng API ghim 2.0 ở trên.
 
 ### Ghim tin nhắn chat riêng 1-1
 

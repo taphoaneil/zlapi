@@ -16,6 +16,7 @@ import websocket
 from PIL import Image
 
 from .models import *
+from ._pins import PinService
 from . import _util, _state
 from urllib.parse import urlencode, urlparse
 from concurrent.futures import ThreadPoolExecutor
@@ -145,6 +146,28 @@ class ZaloAPI(object):
 	def _post(self, *args, **kwargs):
 		return self._state._post(*args, **kwargs)
 
+	def _pins(self):
+		"""Return the one shared implementation for all supported pin threads."""
+		if not hasattr(self, "_pin_service"):
+			self._pin_service = PinService(self)
+		return self._pin_service
+
+	def pinMessage(self, message, thread_id, thread_type=None):
+		"""Pin a message; infer USER/GROUP when thread_type is omitted."""
+		return self._pins().create(message, thread_id, thread_type)
+
+	def getPinnedMessages(self, thread_id, thread_type=None):
+		"""List pins; infer USER/GROUP when thread_type is omitted."""
+		return self._pins().list(thread_id, thread_type)
+
+	def unpinMessage(self, pin_id, thread_id, thread_type=None):
+		"""Remove a pin; infer USER/GROUP when thread_type is omitted."""
+		return self._pins().remove(pin_id, thread_id, thread_type)
+
+	def unpinAllMessages(self, thread_id, thread_type=None):
+		"""Remove all pins; infer USER/GROUP when thread_type is omitted."""
+		return self._pins().remove_all(thread_id, thread_type)
+
 	def _emit_message(self, mid, author_id, message, message_object, thread_id, thread_type):
 		"""Invoke ``onMessage`` using the listener's configured execution mode."""
 		if self.thread:
@@ -152,17 +175,42 @@ class ZaloAPI(object):
 		else:
 			self.onMessage(mid, author_id, message, message_object, thread_id, thread_type)
 
+	def _emit_pin_event(self, event):
+		self._pins().remember_thread(event.thread_id, event.thread_type)
+		if self.thread:
+			pool.submit(self.onPinEvent, event)
+		else:
+			self.onPinEvent(event)
+
 	def _handle_ws_controls(self, controls):
 		"""Dispatch controls independently so one bad event cannot drop a batch."""
-		pin_events = {
-			"pin_create": EventType.NEW_PIN_TOPIC,
-			"pin_unpin": EventType.UNPIN_TOPIC,
-		}
+		pin_events = {"pin_create": PinEventType.CREATED, "pin_unpin": PinEventType.REMOVED,
+			"new_pin_topic": PinEventType.CREATED, "unpin_topic": PinEventType.REMOVED,
+			"update_pin_topic": PinEventType.UPDATED, "reorder_pin_topic": PinEventType.REORDERED}
 		for control in controls:
 			try:
 				content = control.get("content", {})
 				act_type, act = content.get("act_type"), content.get("act")
-				if act_type == "group":
+				if act in pin_events and act_type in ("fr", "group"):
+					data = self._pin_json(content["data"])
+					if not isinstance(data, dict):
+						raise ValueError("Invalid pin event")
+					data = dict(data)
+					thread_type = ThreadType.GROUP if act_type == "group" else ThreadType.USER
+					thread_id = self._pin_id(data.get("groupId") or data.get("grid") or data.get("conversationId"), "thread_id")
+					topic = data.get("topic")
+					pins, ids = [], []
+					if topic:
+						normalized = self._normalize_pin_topic(topic)
+						pin_id = normalized.get("id") or normalized.get("topicId")
+						if pin_id is not None: ids.append(str(pin_id))
+						if pin_events[act] == PinEventType.CREATED:
+							pins.append(self._pins()._pin(normalized, thread_id, thread_type, data.get("version") or normalized.get("createTime")))
+					for item in data.get("topics", []):
+						pin_id = item.get("topicId") if isinstance(item, dict) else None
+						if pin_id is not None: ids.append(str(pin_id))
+					self._emit_pin_event(PinEvent(pin_events[act], thread_id, thread_type, data.get("actorId"), ids, pins, control))
+				elif act_type == "group":
 					if act == "join_reject":
 						continue
 					data = self._pin_json(content["data"])
@@ -172,20 +220,6 @@ class ZaloAPI(object):
 						pool.submit(self.onEvent, event, event_type)
 					else:
 						self.onEvent(event, event_type)
-				elif act_type == "fr" and act in pin_events:
-					data = self._pin_json(content["data"])
-					if not isinstance(data, dict):
-						raise ValueError("Invalid direct-message pin event")
-					data = dict(data)
-					if "topic" in data:
-						data["topic"] = self._normalize_pin_topic(data["topic"])
-					event = EventObject.fromDict(data)
-					thread_id = self._pin_id(data.get("conversationId"), "conversationId")
-					author_id = self._pin_id(data.get("actorId"), "actorId")
-					msg = MessageObject.fromDict(dict(control), None)
-					msg.event_type = pin_events[act]
-					msg.event_data = event
-					self._emit_message(control.get("msgId"), author_id, event, msg, thread_id, ThreadType.USER)
 			except Exception as error:
 				self.onErrorCallBack(error)
 
@@ -232,6 +266,7 @@ class ZaloAPI(object):
 
 	def _handle_incoming_message(self, mid, author_id, message, message_object, thread_id, thread_type):
 		"""Buffer grouped images and emit a completed album once, in display order."""
+		self._pins().remember_thread(thread_id, thread_type)
 		details = self._parse_image_group_details(message, message_object)
 		if details is None:
 			self._emit_message(mid, author_id, message, message_object, thread_id, thread_type)
@@ -946,7 +981,7 @@ class ZaloAPI(object):
 		
 		return response
 	
-	def getGroupPinMsg(self, groupId, page=1, count=20, last_id=0, last_type=0):
+	def _legacy_getGroupPinMsg(self, groupId, page=1, count=20, last_id=0, last_type=0):
 		"""Get group pinned messages by ID.
 			
 		Args:
@@ -1025,7 +1060,7 @@ class ZaloAPI(object):
 		except (ValueError, TypeError, KeyError, AttributeError) as error:
 			raise ZaloAPIException(f"Invalid friend board response: {error}") from error
 
-	def getUserPinMsg(self, userId):
+	def _legacy_getUserPinMsg(self, userId):
 		"""Return User(data=[pin topics], version=...) in server order.
 
 		Topic records and their JSON params are decoded. Only pinned messages
@@ -1045,12 +1080,12 @@ class ZaloAPI(object):
 		except (ValueError, TypeError, KeyError) as error:
 			raise ZaloAPIException(f"Invalid friend board list: {error}") from error
 
-	def getLatestUserPinMsg(self, userId):
+	def _legacy_getLatestUserPinMsg(self, userId):
 		"""Return the first currently pinned message in server order, or None."""
-		pins = self.getUserPinMsg(userId).data
+		pins = self._legacy_getUserPinMsg(userId).data
 		return pins[0] if pins else None
 
-	def pinUserMsg(self, pinMsg, userId, version=0):
+	def _legacy_pinUserMsg(self, pinMsg, userId, version=0):
 		"""Pin a received/sent MessageObject in a one-to-one chat without expiry.
 
 		pinMsg must include msgType, msgId, cliMsgId, uidFrom, dName and content.
@@ -1077,7 +1112,7 @@ class ZaloAPI(object):
 		except (ValueError, TypeError) as error:
 			raise ZaloAPIException(f"Invalid created pin: {error}") from error
 
-	def unpinUserMsg(self, pinId, pinVersion, userId):
+	def _legacy_unpinUserMsg(self, pinId, pinVersion, userId):
 		"""Unpin a topic using the board version returned by getUserPinMsg.
 
 		pinId is the pin record's id, not its message ID. Returns the decoded
@@ -2251,7 +2286,7 @@ class ZaloAPI(object):
 				"href": pinMsg.content.href,
 				"thumb": pinMsg.content.thumb or "",
 				"title": pinMsg.content.title,
-				"linkCaption": "https://vrxx1337.vercel.app",
+				"linkCaption": extra.get("linkCaption", pinMsg.content.href),
 				"redirect_url": extra.get("redirect_url", ""),
 				"streamUrl": extra.get("streamUrl", ""),
 				"artist": extra.get("artist", ""),
@@ -2292,7 +2327,7 @@ class ZaloAPI(object):
 				"senderName": pinMsg.dName,
 				"title": pinMsg.content.title,
 				"extra": json.dumps({
-					"fileSize": "7295",
+					"fileSize": str(extra.get("fileSize", "")),
 					"checksum": extra.get("checksum", ""),
 					"fileExt": extra.get("fileExt", ""),
 					"tWidth": extra.get("tWidth", 0),
@@ -2317,7 +2352,7 @@ class ZaloAPI(object):
 		
 		return None
 
-	def pinGroupMsg(self, pinMsg, groupId):
+	def _legacy_pinGroupMsg(self, pinMsg, groupId):
 		"""Pin message in group by ID.
 
 		Args:
@@ -2376,7 +2411,7 @@ class ZaloAPI(object):
 		error_message = data.get("error_message") or data.get("data")
 		raise ZaloAPIException(f"Error #{error_code} when sending requests: {error_message}")
 	
-	def unpinGroupMsg(self, pinId, pinTime, groupId):
+	def _legacy_unpinGroupMsg(self, pinId, pinTime, groupId):
 		"""Unpin message in group by ID.
 		
 		Args:
@@ -2909,6 +2944,13 @@ class ZaloAPI(object):
 			# group-board pin API also requires the client ID used to send it.
 			if not getattr(result, "cliMsgId", None):
 				result.cliMsgId = str(client_id)
+			# Make the returned send result directly usable by pinMessage().
+			# The transport response often contains only message identifiers.
+			result.msgType = getattr(result, "msgType", None) or "webchat"
+			result.uidFrom = getattr(result, "uidFrom", None) or self.user_id
+			result.dName = getattr(result, "dName", None) or str(self.user_id)
+			result.content = getattr(result, "content", None) or message.text
+			self._pins().remember_thread(thread_id, thread_type)
 			return result
 			
 		error_code = data.get("error_code")
@@ -4751,6 +4793,9 @@ class ZaloAPI(object):
 			event_data (EventObject): Event data (As a `EventObject` object)
 			event_type (EventType/GroupEventType): Event Type
 		"""
+
+	def onPinEvent(self, event):
+		"""Called for pinned-message changes in user and group conversations."""
 	
 	def onMessageDelivered(
 		self,

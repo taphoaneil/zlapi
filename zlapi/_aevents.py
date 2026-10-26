@@ -33,3 +33,10 @@ class EventType(Enum):
 	REACTION = auto()
 	NEW_PIN_TOPIC = auto()
 	UNPIN_TOPIC = auto()
+
+
+class PinEventType(Enum):
+	CREATED = auto()
+	REMOVED = auto()
+	UPDATED = auto()
+	REORDERED = auto()
